@@ -82,6 +82,7 @@ struct obs_module {
 
 	bool        (*load)(void);
 	void        (*unload)(void);
+	void        (*post_load)(void);
 	void        (*set_locale)(const char *locale);
 	void        (*free_locale)(void);
 	uint32_t    (*ver)(void);
@@ -679,6 +680,8 @@ struct obs_source {
 
 	struct audio_monitor            *monitor;
 	enum obs_monitoring_type        monitoring_type;
+
+	obs_data_t                      *private_settings;
 };
 
 extern const struct obs_source_info *get_source_info(const char *id);

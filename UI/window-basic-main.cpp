@@ -145,26 +145,11 @@ OBSBasic::OBSBasic(QWidget *parent)
 	ui->setupUi(this);
 	ui->previewDisabledLabel->setVisible(false);
 
+	startingDockLayout = saveState();
+
 	copyActionsDynamicProperties();
 
 	ui->sources->setItemDelegate(new VisibilityItemDelegate(ui->sources));
-
-	const char *geometry = config_get_string(App()->GlobalConfig(),
-			"BasicWindow", "geometry");
-	if (geometry != NULL) {
-		QByteArray byteArray = QByteArray::fromBase64(
-				QByteArray(geometry));
-		restoreGeometry(byteArray);
-
-		QRect windowGeometry = normalGeometry();
-		if (!WindowPositionValid(windowGeometry)) {
-			QRect rect = App()->desktop()->geometry();
-			setGeometry(QStyle::alignedRect(
-						Qt::LeftToRight,
-						Qt::AlignCenter,
-						size(), rect));
-		}
-	}
 
 	char styleSheetPath[512];
 	int ret = GetProfilePath(styleSheetPath, sizeof(styleSheetPath),
@@ -257,6 +242,58 @@ OBSBasic::OBSBasic(QWidget *parent)
 	addNudge(Qt::Key_Down, SLOT(NudgeDown()));
 	addNudge(Qt::Key_Left, SLOT(NudgeLeft()));
 	addNudge(Qt::Key_Right, SLOT(NudgeRight()));
+
+	auto assignDockToggle = [this](QDockWidget *dock, QAction *action)
+	{
+		auto handleWindowToggle = [action] (bool vis)
+		{
+			action->blockSignals(true);
+			action->setChecked(vis);
+			action->blockSignals(false);
+		};
+		auto handleMenuToggle = [dock] (bool check)
+		{
+			dock->blockSignals(true);
+			dock->setVisible(check);
+			dock->blockSignals(false);
+		};
+
+		dock->connect(dock->toggleViewAction(), &QAction::toggled,
+				handleWindowToggle);
+		dock->connect(action, &QAction::toggled,
+				handleMenuToggle);
+	};
+
+	assignDockToggle(ui->scenesDock, ui->toggleScenes);
+	assignDockToggle(ui->sourcesDock, ui->toggleSources);
+	assignDockToggle(ui->mixerDock, ui->toggleMixer);
+	assignDockToggle(ui->transitionsDock, ui->toggleTransitions);
+	assignDockToggle(ui->controlsDock, ui->toggleControls);
+
+	//hide all docking panes
+	ui->toggleScenes->setChecked(false);
+	ui->toggleSources->setChecked(false);
+	ui->toggleMixer->setChecked(false);
+	ui->toggleTransitions->setChecked(false);
+	ui->toggleControls->setChecked(false);
+
+	//restore parent window geometry
+	const char *geometry = config_get_string(App()->GlobalConfig(),
+			"BasicWindow", "geometry");
+	if (geometry != NULL) {
+		QByteArray byteArray = QByteArray::fromBase64(
+				QByteArray(geometry));
+		restoreGeometry(byteArray);
+
+		QRect windowGeometry = normalGeometry();
+		if (!WindowPositionValid(windowGeometry)) {
+			QRect rect = App()->desktop()->geometry();
+			setGeometry(QStyle::alignedRect(
+						Qt::LeftToRight,
+						Qt::AlignCenter,
+						size(), rect));
+		}
+	}
 }
 
 static void SaveAudioDevice(const char *name, int channel, obs_data_t *parent,
@@ -430,8 +467,14 @@ void OBSBasic::Save(const char *file)
 			savedPreviewProjectorList);
 
 	obs_data_set_bool(saveData, "preview_locked", ui->preview->Locked());
-	obs_data_set_int(saveData, "scaling_mode",
-			static_cast<uint32_t>(ui->preview->GetScalingMode()));
+	obs_data_set_bool(saveData, "scaling_enabled",
+			ui->preview->IsFixedScaling());
+	obs_data_set_int(saveData, "scaling_level",
+			ui->preview->GetScalingLevel());
+	obs_data_set_double(saveData, "scaling_off_x",
+			ui->preview->GetScrollX());
+	obs_data_set_double(saveData, "scaling_off_y",
+			ui->preview->GetScrollY());
 
 	if (api) {
 		obs_data_t *moduleObj = obs_data_create();
@@ -771,18 +814,20 @@ retryScene:
 	ui->preview->SetLocked(previewLocked);
 	ui->actionLockPreview->setChecked(previewLocked);
 
-	ScalingMode previewScaling = static_cast<ScalingMode>(
-			obs_data_get_int(data, "scaling_mode"));
-	switch (previewScaling) {
-	case ScalingMode::Window:
-	case ScalingMode::Canvas:
-	case ScalingMode::Output:
-		break;
-	default:
-		previewScaling = ScalingMode::Window;
-	}
+	/* ---------------------- */
 
-	ui->preview->SetScaling(previewScaling);
+	bool fixedScaling = obs_data_get_bool(data, "scaling_enabled");
+	int scalingLevel = (int)obs_data_get_int(data, "scaling_level");
+	float scrollOffX = (float)obs_data_get_double(data, "scaling_off_x");
+	float scrollOffY = (float)obs_data_get_double(data, "scaling_off_y");
+
+	if (fixedScaling) {
+		ui->preview->SetScalingLevel(scalingLevel);
+		ui->preview->SetScrollingOffset(scrollOffX, scrollOffY);
+	}
+	ui->preview->SetFixedScaling(fixedScaling);
+
+	/* ---------------------- */
 
 	if (api) {
 		obs_data_t *modulesObj = obs_data_get_obj(data, "modules");
@@ -1012,6 +1057,10 @@ bool OBSBasic::InitBasicConfigDefaults()
 	config_set_default_uint  (basicConfig, "AdvOut", "Track5Bitrate", 160);
 	config_set_default_uint  (basicConfig, "AdvOut", "Track6Bitrate", 160);
 
+	config_set_default_bool  (basicConfig, "AdvOut", "RecRB", false);
+	config_set_default_uint  (basicConfig, "AdvOut", "RecRBTime", 20);
+	config_set_default_int   (basicConfig, "AdvOut", "RecRBSize", 512);
+
 	config_set_default_uint  (basicConfig, "Video", "BaseCX",   cx);
 	config_set_default_uint  (basicConfig, "Video", "BaseCY",   cy);
 
@@ -1218,6 +1267,7 @@ void OBSBasic::ResetOutputs()
 					this,
 					&OBSBasic::ReplayBufferClicked);
 
+			replayBufferButton->setProperty("themeID", "replayBufferButton");
 			ui->buttonsVLayout->insertWidget(2, replayBufferButton);
 		}
 
@@ -1308,6 +1358,8 @@ void OBSBasic::OBSInit()
 	obs_load_all_modules();
 	blog(LOG_INFO, "---------------------------------");
 	obs_log_loaded_modules();
+	blog(LOG_INFO, "---------------------------------");
+	obs_post_load_modules();
 
 	blog(LOG_INFO, STARTUP_SEPARATOR);
 
@@ -1344,7 +1396,6 @@ void OBSBasic::OBSInit()
 		} \
 	} while (false)
 
-	SET_VISIBILITY("ShowTransitions", toggleSceneTransitions);
 	SET_VISIBILITY("ShowListboxToolbars", toggleListboxToolbars);
 	SET_VISIBILITY("ShowStatusBar", toggleStatusBar);
 #undef SET_VISIBILITY
@@ -1408,28 +1459,33 @@ void OBSBasic::OBSInit()
 	show();
 #endif
 
-	QList<int> defSizes;
-
-	int top = config_get_int(App()->GlobalConfig(), "BasicWindow",
-			"splitterTop");
-	int bottom = config_get_int(App()->GlobalConfig(), "BasicWindow",
-			"splitterBottom");
-
-	if (!top || !bottom) {
-		defSizes = ui->mainSplitter->sizes();
-		int total = defSizes[0] + defSizes[1];
-		defSizes[0] = total * 75 / 100;
-		defSizes[1] = total - defSizes[0];
+	const char *dockStateStr = config_get_string(App()->GlobalConfig(),
+			"BasicWindow", "DockState");
+	if (!dockStateStr) {
+		on_resetUI_triggered();
 	} else {
-		defSizes.push_back(top);
-		defSizes.push_back(bottom);
+		QByteArray dockState =
+			QByteArray::fromBase64(QByteArray(dockStateStr));
+		if (!restoreState(dockState))
+			on_resetUI_triggered();
 	}
 
-	ui->mainSplitter->setSizes(defSizes);
+	config_set_default_bool(App()->GlobalConfig(), "BasicWindow",
+			"DocksLocked", true);
+
+	bool docksLocked = config_get_bool(App()->GlobalConfig(),
+			"BasicWindow", "DocksLocked");
+	on_lockUI_toggled(docksLocked);
+	ui->lockUI->blockSignals(true);
+	ui->lockUI->setChecked(docksLocked);
+	ui->lockUI->blockSignals(false);
 
 	SystemTray(true);
 
 	OpenSavedProjectors();
+
+	if (windowState().testFlag(Qt::WindowFullScreen))
+		fullscreenInterface = true;
 
 	bool has_last_version = config_has_user_value(App()->GlobalConfig(),
 			"General", "LastVersion");
@@ -1744,13 +1800,8 @@ OBSBasic::~OBSBasic()
 	config_set_int(App()->GlobalConfig(), "General", "LastVersion",
 			LIBOBS_API_VER);
 
-	QList<int> splitterSizes = ui->mainSplitter->sizes();
 	bool alwaysOnTop = IsAlwaysOnTop(this);
 
-	config_set_int(App()->GlobalConfig(), "BasicWindow", "splitterTop",
-			splitterSizes[0]);
-	config_set_int(App()->GlobalConfig(), "BasicWindow", "splitterBottom",
-			splitterSizes[1]);
 	config_set_bool(App()->GlobalConfig(), "BasicWindow", "PreviewEnabled",
 			previewEnabled);
 	config_set_bool(App()->GlobalConfig(), "BasicWindow", "AlwaysOnTop",
@@ -1763,6 +1814,8 @@ OBSBasic::~OBSBasic()
 			"EditPropertiesMode", editPropertiesMode);
 	config_set_bool(App()->GlobalConfig(), "BasicWindow",
 			"PreviewProgramMode", IsPreviewProgramMode());
+	config_set_bool(App()->GlobalConfig(), "BasicWindow",
+			"DocksLocked", ui->lockUI->isChecked());
 	config_save_safe(App()->GlobalConfig(), "tmp", nullptr);
 
 #ifdef _WIN32
@@ -1845,13 +1898,22 @@ OBSSceneItem OBSBasic::GetCurrentSceneItem()
 
 void OBSBasic::UpdatePreviewScalingMenu()
 {
-	ScalingMode scalingMode = ui->preview->GetScalingMode();
-	ui->actionScaleWindow->setChecked(
-			scalingMode == ScalingMode::Window);
-	ui->actionScaleCanvas->setChecked(
-			scalingMode == ScalingMode::Canvas);
+	bool fixedScaling = ui->preview->IsFixedScaling();
+	float scalingAmount = ui->preview->GetScalingAmount();
+	if (!fixedScaling) {
+		ui->actionScaleWindow->setChecked(true);
+		ui->actionScaleCanvas->setChecked(false);
+		ui->actionScaleOutput->setChecked(false);
+		return;
+	}
+
+	obs_video_info ovi;
+	obs_get_video_info(&ovi);
+
+	ui->actionScaleWindow->setChecked(false);
+	ui->actionScaleCanvas->setChecked(scalingAmount == 1.0f);
 	ui->actionScaleOutput->setChecked(
-			scalingMode == ScalingMode::Output);
+			scalingAmount == float(ovi.output_width) / float(ovi.base_width));
 }
 
 void OBSBasic::UpdateSources(OBSScene scene)
@@ -2136,6 +2198,22 @@ void OBSBasic::SelectSceneItem(OBSScene scene, OBSSceneItem item, bool select)
 	}
 }
 
+static inline bool SourceMixerHidden(obs_source_t *source)
+{
+	obs_data_t *priv_settings = obs_source_get_private_settings(source);
+	bool hidden = obs_data_get_bool(priv_settings, "mixer_hidden");
+	obs_data_release(priv_settings);
+
+	return hidden;
+}
+
+static inline void SetSourceMixerHidden(obs_source_t *source, bool hidden)
+{
+	obs_data_t *priv_settings = obs_source_get_private_settings(source);
+	obs_data_set_bool(priv_settings, "mixer_hidden", hidden);
+	obs_data_release(priv_settings);
+}
+
 void OBSBasic::GetAudioSourceFilters()
 {
 	QAction *action = reinterpret_cast<QAction*>(sender());
@@ -2154,12 +2232,77 @@ void OBSBasic::GetAudioSourceProperties()
 	CreatePropertiesWindow(source);
 }
 
+void OBSBasic::HideAudioControl()
+{
+	QAction *action = reinterpret_cast<QAction*>(sender());
+	VolControl *vol = action->property("volControl").value<VolControl*>();
+	obs_source_t *source = vol->GetSource();
+
+	if (!SourceMixerHidden(source)) {
+		SetSourceMixerHidden(source, true);
+		DeactivateAudioSource(source);
+	}
+}
+
+void OBSBasic::UnhideAllAudioControls()
+{
+	auto UnhideAudioMixer = [this] (obs_source_t *source) /* -- */
+	{
+		if (!obs_source_active(source))
+			return true;
+		if (!SourceMixerHidden(source))
+			return true;
+
+		SetSourceMixerHidden(source, false);
+		ActivateAudioSource(source);
+		return true;
+	};
+
+	using UnhideAudioMixer_t = decltype(UnhideAudioMixer);
+
+	auto PreEnum = [] (void *data, obs_source_t *source) -> bool /* -- */
+	{
+		return (*reinterpret_cast<UnhideAudioMixer_t *>(data))(source);
+	};
+
+	obs_enum_sources(PreEnum, &UnhideAudioMixer);
+}
+
+void OBSBasic::ToggleHideMixer()
+{
+	OBSSceneItem item = GetCurrentSceneItem();
+	OBSSource source = obs_sceneitem_get_source(item);
+
+	if (!SourceMixerHidden(source)) {
+		SetSourceMixerHidden(source, true);
+		DeactivateAudioSource(source);
+	} else {
+		SetSourceMixerHidden(source, false);
+		ActivateAudioSource(source);
+	}
+}
+
 void OBSBasic::VolControlContextMenu()
 {
 	VolControl *vol = reinterpret_cast<VolControl*>(sender());
 
+	/* ------------------- */
+
+	QAction hideAction(QTStr("Hide"), this);
+	QAction unhideAllAction(QTStr("UnhideAll"), this);
+
 	QAction filtersAction(QTStr("Filters"), this);
 	QAction propertiesAction(QTStr("Properties"), this);
+	QAction advPropAction(QTStr("Basic.MainMenu.Edit.AdvAudio"), this);
+
+	/* ------------------- */
+
+	connect(&hideAction, &QAction::triggered,
+			this, &OBSBasic::HideAudioControl,
+			Qt::DirectConnection);
+	connect(&unhideAllAction, &QAction::triggered,
+			this, &OBSBasic::UnhideAllAudioControls,
+			Qt::DirectConnection);
 
 	connect(&filtersAction, &QAction::triggered,
 			this, &OBSBasic::GetAudioSourceFilters,
@@ -2167,22 +2310,68 @@ void OBSBasic::VolControlContextMenu()
 	connect(&propertiesAction, &QAction::triggered,
 			this, &OBSBasic::GetAudioSourceProperties,
 			Qt::DirectConnection);
+	connect(&advPropAction, &QAction::triggered,
+			this, &OBSBasic::on_actionAdvAudioProperties_triggered,
+			Qt::DirectConnection);
+
+	/* ------------------- */
+
+	hideAction.setProperty("volControl",
+			QVariant::fromValue<VolControl*>(vol));
 
 	filtersAction.setProperty("volControl",
 			QVariant::fromValue<VolControl*>(vol));
 	propertiesAction.setProperty("volControl",
 			QVariant::fromValue<VolControl*>(vol));
 
+	/* ------------------- */
+
 	QMenu popup(this);
+	popup.addAction(&unhideAllAction);
+	popup.addAction(&hideAction);
+	popup.addSeparator();
 	popup.addAction(&filtersAction);
 	popup.addAction(&propertiesAction);
+	popup.addAction(&advPropAction);
+	popup.exec(QCursor::pos());
+}
+
+void OBSBasic::on_mixerScrollArea_customContextMenuRequested()
+{
+	QAction unhideAllAction(QTStr("UnhideAll"), this);
+
+	QAction advPropAction(QTStr("Basic.MainMenu.Edit.AdvAudio"), this);
+
+	/* ------------------- */
+
+	connect(&unhideAllAction, &QAction::triggered,
+			this, &OBSBasic::UnhideAllAudioControls,
+			Qt::DirectConnection);
+
+	connect(&advPropAction, &QAction::triggered,
+			this, &OBSBasic::on_actionAdvAudioProperties_triggered,
+			Qt::DirectConnection);
+
+	/* ------------------- */
+
+	QMenu popup(this);
+	popup.addAction(&unhideAllAction);
+	popup.addSeparator();
+	popup.addAction(&advPropAction);
 	popup.exec(QCursor::pos());
 }
 
 void OBSBasic::ActivateAudioSource(OBSSource source)
 {
+	if (SourceMixerHidden(source))
+		return;
+
 	VolControl *vol = new VolControl(source, true);
 
+	vol->setContextMenuPolicy(Qt::CustomContextMenu);
+
+	connect(vol, &QWidget::customContextMenuRequested,
+			this, &OBSBasic::VolControlContextMenu);
 	connect(vol, &VolControl::ConfigClicked,
 			this, &OBSBasic::VolControlContextMenu);
 
@@ -2280,6 +2469,8 @@ void OBSBasic::CheckForUpdates(bool manualUpdate)
 	updateCheckThread = new AutoUpdateThread(manualUpdate);
 	updateCheckThread->start();
 #endif
+
+	UNUSED_PARAMETER(manualUpdate);
 }
 
 void OBSBasic::updateCheckFinished()
@@ -2730,7 +2921,8 @@ int OBSBasic::ResetVideo()
 		VIDEO_CS_601 : VIDEO_CS_709;
 	ovi.range          = astrcmpi(colorRange, "Full") == 0 ?
 		VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL;
-	ovi.adapter        = 0;
+	ovi.adapter        = config_get_uint(App()->GlobalConfig(),
+			"Video", "AdapterIdx");
 	ovi.gpu_conversion = true;
 	ovi.scale_type     = GetScaleType(basicConfig);
 
@@ -2839,32 +3031,23 @@ void OBSBasic::ResetAudioDevice(const char *sourceId, const char *deviceId,
 void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 {
 	QSize  targetSize;
-	ScalingMode scalingMode;
+	bool isFixedScaling;
 	obs_video_info ovi;
 
 	/* resize preview panel to fix to the top section of the window */
 	targetSize = GetPixelSize(ui->preview);
 
-	scalingMode = ui->preview->GetScalingMode();
+	isFixedScaling = ui->preview->IsFixedScaling();
 	obs_get_video_info(&ovi);
 
-	if (scalingMode == ScalingMode::Canvas) {
-		previewScale = 1.0f;
+	if (isFixedScaling) {
+		previewScale = ui->preview->GetScalingAmount();
 		GetCenterPosFromFixedScale(int(cx), int(cy),
 				targetSize.width() - PREVIEW_EDGE_SIZE * 2,
 				targetSize.height() - PREVIEW_EDGE_SIZE * 2,
 				previewX, previewY, previewScale);
-		previewX += ui->preview->ScrollX();
-		previewY += ui->preview->ScrollY();
-
-	} else if (scalingMode == ScalingMode::Output) {
-		previewScale = float(ovi.output_width) / float(ovi.base_width);
-		GetCenterPosFromFixedScale(int(cx), int(cy),
-				targetSize.width() - PREVIEW_EDGE_SIZE * 2,
-				targetSize.height() - PREVIEW_EDGE_SIZE * 2,
-				previewX, previewY, previewScale);
-		previewX += ui->preview->ScrollX();
-		previewY += ui->preview->ScrollY();
+		previewX += ui->preview->GetScrollX();
+		previewY += ui->preview->GetScrollY();
 
 	} else {
 		GetScaleAndCenterPos(int(cx), int(cy),
@@ -2895,7 +3078,7 @@ void OBSBasic::CloseDialogs()
 		projector.clear();
 	}
 
-	delete stats;
+	if (!stats.isNull()) stats->close(); //call close to save Stats geometry
 }
 
 void OBSBasic::EnumDialogs()
@@ -2964,6 +3147,10 @@ void OBSBasic::closeEvent(QCloseEvent *event)
 		config_set_string(App()->GlobalConfig(),
 				"BasicWindow", "geometry",
 				saveGeometry().toBase64().constData());
+
+	config_set_string(App()->GlobalConfig(),
+			"BasicWindow", "DockState",
+			saveState().toBase64().constData());
 
 	if (outputHandler && outputHandler->Active()) {
 		SetShowing(true);
@@ -3463,6 +3650,8 @@ void OBSBasic::CreateSourcePopupMenu(QListWidgetItem *item, bool preview)
 		uint32_t flags = obs_source_get_output_flags(source);
 		bool isAsyncVideo = (flags & OBS_SOURCE_ASYNC_VIDEO) ==
 			OBS_SOURCE_ASYNC_VIDEO;
+		bool hasAudio = (flags & OBS_SOURCE_AUDIO) ==
+			OBS_SOURCE_AUDIO;
 		QAction *action;
 
 		popup.addAction(QTStr("Rename"), this,
@@ -3485,6 +3674,15 @@ void OBSBasic::CreateSourcePopupMenu(QListWidgetItem *item, bool preview)
 		popup.addAction(sourceWindow);
 
 		popup.addSeparator();
+
+		if (hasAudio) {
+			QAction *actionHideMixer = popup.addAction(
+					QTStr("HideMixer"),
+					this, SLOT(ToggleHideMixer()));
+			actionHideMixer->setCheckable(true);
+			actionHideMixer->setChecked(SourceMixerHidden(source));
+		}
+
 		if (isAsyncVideo) {
 			popup.addMenu(AddDeinterlacingMenu(source));
 			popup.addSeparator();
@@ -5001,6 +5199,9 @@ void OBSBasic::Nudge(int dist, MoveDir dir)
 
 	auto func = [] (obs_scene_t*, obs_sceneitem_t *item, void *param)
 	{
+		if (obs_sceneitem_locked(item))
+			return true;
+
 		MoveInfo *info = reinterpret_cast<MoveInfo*>(param);
 		struct vec2 dir;
 		struct vec2 pos;
@@ -5177,6 +5378,16 @@ void OBSBasic::RemoveSavedProjectors(int monitor)
 	projectorArray.at((size_t)monitor) = "";
 }
 
+void OBSBasic::on_actionFullscreenInterface_triggered()
+{
+	if (!fullscreenInterface)
+		showFullScreen();
+	else
+		showNormal();
+
+	fullscreenInterface = !fullscreenInterface;
+}
+
 void OBSBasic::UpdateTitleBar()
 {
 	stringstream name;
@@ -5224,13 +5435,59 @@ int OBSBasic::GetProfilePath(char *path, size_t size, const char *file) const
 	return snprintf(path, size, "%s/%s/%s", profiles_path, profile, file);
 }
 
-void OBSBasic::on_toggleSceneTransitions_toggled(bool visible)
+void OBSBasic::on_resetUI_triggered()
 {
-	ui->sceneTransitionsLabel->setVisible(visible);
-	ui->transitionsContainer->setVisible(visible);
+	restoreState(startingDockLayout);
 
-	config_set_bool(App()->GlobalConfig(), "BasicWindow",
-			"ShowTransitions", visible);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 6, 0)
+	int cx = width();
+	int cy = height();
+
+	int cx22_5 = cx * 225 / 1000;
+	int cx5 = cx * 5 / 100;
+
+	cy = cy * 225 / 1000;
+
+	int mixerSize = cx - (cx22_5 * 2 + cx5 * 2);
+
+	QList<QDockWidget*> docks {
+		ui->scenesDock,
+		ui->sourcesDock,
+		ui->mixerDock,
+		ui->transitionsDock,
+		ui->controlsDock
+	};
+
+	QList<int> sizes {
+		cx22_5,
+		cx22_5,
+		mixerSize,
+		cx5,
+		cx5
+	};
+
+	ui->scenesDock->setVisible(true);
+	ui->sourcesDock->setVisible(true);
+	ui->mixerDock->setVisible(true);
+	ui->transitionsDock->setVisible(true);
+	ui->controlsDock->setVisible(true);
+
+	resizeDocks(docks, {cy, cy, cy, cy, cy}, Qt::Vertical);
+	resizeDocks(docks, sizes, Qt::Horizontal);
+#endif
+}
+
+void OBSBasic::on_lockUI_toggled(bool lock)
+{
+	QDockWidget::DockWidgetFeatures features = lock
+		? QDockWidget::NoDockWidgetFeatures
+		: QDockWidget::AllDockWidgetFeatures;
+
+	ui->scenesDock->setFeatures(features);
+	ui->sourcesDock->setFeatures(features);
+	ui->mixerDock->setFeatures(features);
+	ui->transitionsDock->setFeatures(features);
+	ui->controlsDock->setFeatures(features);
 }
 
 void OBSBasic::on_toggleListboxToolbars_toggled(bool visible)
@@ -5272,26 +5529,38 @@ void OBSBasic::on_scalingMenu_aboutToShow()
 	text = text.arg(QString::number(ovi.output_width),
 			QString::number(ovi.output_height));
 	action->setText(text);
+	action->setVisible(!(ovi.output_width == ovi.base_width &&
+			ovi.output_height == ovi.base_height));
 
 	UpdatePreviewScalingMenu();
 }
 
 void OBSBasic::on_actionScaleWindow_triggered()
 {
-	ui->preview->SetScaling(ScalingMode::Window);
+	ui->preview->SetFixedScaling(false);
 	ui->preview->ResetScrollingOffset();
 	emit ui->preview->DisplayResized();
 }
 
 void OBSBasic::on_actionScaleCanvas_triggered()
 {
-	ui->preview->SetScaling(ScalingMode::Canvas);
+	ui->preview->SetFixedScaling(true);
+	ui->preview->SetScalingLevel(0);
 	emit ui->preview->DisplayResized();
 }
 
 void OBSBasic::on_actionScaleOutput_triggered()
 {
-	ui->preview->SetScaling(ScalingMode::Output);
+	obs_video_info ovi;
+	obs_get_video_info(&ovi);
+
+	ui->preview->SetFixedScaling(true);
+	float scalingAmount = float(ovi.output_width) / float(ovi.base_width);
+	// log base ZOOM_SENSITIVITY of x = log(x) / log(ZOOM_SENSITIVITY)
+	int32_t approxScalingLevel = int32_t(
+			round(log(scalingAmount) / log(ZOOM_SENSITIVITY)));
+	ui->preview->SetScalingLevel(approxScalingLevel);
+	ui->preview->SetScalingAmount(scalingAmount);
 	emit ui->preview->DisplayResized();
 }
 
@@ -5396,8 +5665,13 @@ void OBSBasic::SystemTrayInit()
 	connect(exit, SIGNAL(triggered()),
 			this, SLOT(close()));
 
+	QMenu *previewProjector = new QMenu(QTStr("PreviewProjector"));
+	AddProjectorMenuMonitors(previewProjector, this,
+			SLOT(OpenPreviewProjector()));
+
 	trayMenu = new QMenu;
 	trayMenu->addAction(showHide);
+	trayMenu->addMenu(previewProjector);
 	trayMenu->addAction(sysTrayStream);
 	trayMenu->addAction(sysTrayRecord);
 	trayMenu->addAction(sysTrayReplayBuffer);
